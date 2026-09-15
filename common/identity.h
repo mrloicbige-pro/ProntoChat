@@ -9,6 +9,7 @@
 
 #define CHAT_CONFIG_DIR_ENV "CHAT_CONFIG_DIR"
 #define CHAT_IDENTITY_FINGERPRINT_LEN (crypto_generichash_BYTES * 3u)
+#define CHAT_IDENTITY_SERVER_URL_MAX 256u
 
 typedef enum {
     CHAT_IDENTITY_OK = 0,
@@ -35,6 +36,7 @@ chat_identity_result_t chat_identity_create(const char *username,
                                             char *fingerprint_out,
                                             size_t fingerprint_out_size);
 chat_identity_result_t chat_identity_load(chat_identity_t *out_identity);
+chat_identity_result_t chat_identity_load_server_url(char *out, size_t out_size);
 void chat_identity_wipe(chat_identity_t *identity);
 
 chat_identity_result_t chat_identity_fingerprint(

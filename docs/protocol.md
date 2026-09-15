@@ -29,3 +29,61 @@ The default config directory is `~/.config/chat` on Linux and
 
 The displayed fingerprint is a BLAKE2b hash of the Ed25519 public key, formatted
 as uppercase colon-separated hex.
+
+## Control Server V1
+
+`chat-server` exposes a WebSocket protocol named `chat-control-v1` on port
+`8787` by default. The current V1 server keeps users in memory and supports:
+
+- `register`: `{ "type": "register", "username": "...", "public_key": "<hex Ed25519 pk>" }`
+- `hello`: `{ "type": "hello", "username": "..." }`
+- `auth_response`: `{ "type": "auth_response", "signature": "<hex detached signature>" }`
+- `user_lookup`: `{ "type": "user_lookup", "username": "..." }`
+
+The server answers `hello` with an `auth_challenge` containing 32 random bytes in
+hex. The client must sign those exact challenge bytes with its Ed25519 account
+secret key. Only authenticated WebSocket sessions can use `user_lookup`.
+
+This implementation does not persist server registrations yet; that belongs with
+the later production storage work. The control server still never accepts or
+stores chat plaintext.
+
+## Daemon Presence
+
+`chatd` now loads the local identity and `server_url` from `config.toml`, opens a
+WebSocket client connection, and performs the development control-plane flow:
+
+1. `register` with username and Ed25519 public key.
+2. `hello` with username.
+3. Sign the server challenge using `crypto_sign_detached`.
+4. Enter the online state after `auth_ok`.
+
+Because server registrations are still in memory, `chatd` accepts
+`user already exists` during the register phase and continues to authentication.
+Future persistence will remove the need to re-register after every server start.
+
+## Local IPC
+
+`chat` talks to `chatd` over a Unix domain socket. The path is resolved in this
+order:
+
+1. `CHAT_SOCKET_PATH` when set, useful for tests.
+2. `$XDG_RUNTIME_DIR/chatd.sock`.
+3. `<chat config dir>/chatd.sock`.
+
+The first implemented command is:
+
+```text
+STATUS
+```
+
+The daemon responds with one line:
+
+```text
+ONLINE alex
+CONNECTING alex
+OFFLINE alex
+```
+
+The socket file is created with mode `0600` and removed when `chatd` exits
+normally.

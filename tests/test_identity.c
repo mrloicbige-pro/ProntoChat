@@ -31,6 +31,10 @@ static void test_identity_create_load_and_permissions(void)
     assert(chat_identity_load(&identity) == CHAT_IDENTITY_OK);
     assert(strcmp(identity.username, "alex") == 0);
 
+    char server_url[CHAT_IDENTITY_SERVER_URL_MAX];
+    assert(chat_identity_load_server_url(server_url, sizeof(server_url)) == CHAT_IDENTITY_OK);
+    assert(strcmp(server_url, "ws://127.0.0.1:8787") == 0);
+
     char key_path[256];
     int written = snprintf(key_path, sizeof(key_path), "%s/identity.key", config_dir);
     assert(written > 0);

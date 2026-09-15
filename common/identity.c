@@ -232,6 +232,50 @@ static chat_identity_result_t chat_load_username(const char *path,
     return CHAT_IDENTITY_ERR_BAD_FILE;
 }
 
+static chat_identity_result_t chat_load_quoted_config_value(const char *path,
+                                                            const char *key,
+                                                            char *out,
+                                                            size_t out_size)
+{
+    FILE *file = fopen(path, "r");
+    if (file == NULL) {
+        return errno == ENOENT ? CHAT_IDENTITY_ERR_NOT_FOUND : CHAT_IDENTITY_ERR_IO;
+    }
+
+    char prefix[64];
+    int prefix_len = snprintf(prefix, sizeof(prefix), "%s = \"", key);
+    if (prefix_len < 0 || (size_t)prefix_len >= sizeof(prefix)) {
+        (void)fclose(file);
+        return CHAT_IDENTITY_ERR_BUFFER;
+    }
+
+    char line[512];
+    while (fgets(line, sizeof(line), file) != NULL) {
+        if (strncmp(line, prefix, (size_t)prefix_len) != 0) {
+            continue;
+        }
+
+        char *value_start = &line[prefix_len];
+        char *value_end = strchr(value_start, '"');
+        if (value_end == NULL) {
+            (void)fclose(file);
+            return CHAT_IDENTITY_ERR_BAD_FILE;
+        }
+        *value_end = '\0';
+        chat_identity_result_t result = chat_copy_string(out, out_size, value_start);
+        (void)fclose(file);
+        return result;
+    }
+
+    if (ferror(file)) {
+        (void)fclose(file);
+        return CHAT_IDENTITY_ERR_IO;
+    }
+
+    (void)fclose(file);
+    return CHAT_IDENTITY_ERR_NOT_FOUND;
+}
+
 const char *chat_identity_result_name(chat_identity_result_t result)
 {
     switch (result) {
@@ -470,6 +514,23 @@ chat_identity_result_t chat_identity_load(chat_identity_t *out_identity)
     *out_identity = identity;
     chat_identity_wipe(&identity);
     return CHAT_IDENTITY_OK;
+}
+
+chat_identity_result_t chat_identity_load_server_url(char *out, size_t out_size)
+{
+    char config_dir[PATH_MAX];
+    chat_identity_result_t result = chat_identity_config_dir(config_dir, sizeof(config_dir));
+    if (result != CHAT_IDENTITY_OK) {
+        return result;
+    }
+
+    char config_path[PATH_MAX];
+    result = chat_join_path(config_path, sizeof(config_path), config_dir, CHAT_CONFIG_FILE);
+    if (result != CHAT_IDENTITY_OK) {
+        return result;
+    }
+
+    return chat_load_quoted_config_value(config_path, "server_url", out, out_size);
 }
 
 void chat_identity_wipe(chat_identity_t *identity)

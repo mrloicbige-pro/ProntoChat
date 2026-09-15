@@ -1,9 +1,16 @@
+#define _POSIX_C_SOURCE 200809L
+
 #include "common/identity.h"
+#include "common/ipc.h"
 #include "common/log.h"
 #include "common/protocole.h"
 
+#include <errno.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/socket.h>
+#include <sys/un.h>
+#include <unistd.h>
 
 static void print_usage(FILE *stream)
 {
@@ -43,8 +50,54 @@ static int command_init(const char *username)
 
 static int command_status(void)
 {
-    printf("chatd status is not implemented yet.\n");
-    return CHAT_EXIT_DAEMON_UNAVAILABLE;
+    char socket_path[sizeof(((struct sockaddr_un *)0)->sun_path)];
+    if (chat_ipc_socket_path(socket_path, sizeof(socket_path)) != CHAT_IPC_OK) {
+        fprintf(stderr, "Could not resolve chatd socket path.\n");
+        return CHAT_EXIT_DAEMON_UNAVAILABLE;
+    }
+
+    int fd = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (fd < 0) {
+        fprintf(stderr, "Could not create IPC socket: %s.\n", strerror(errno));
+        return CHAT_EXIT_DAEMON_UNAVAILABLE;
+    }
+
+    struct sockaddr_un addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sun_family = AF_UNIX;
+    int copied = snprintf(addr.sun_path, sizeof(addr.sun_path), "%s", socket_path);
+    if (copied < 0 || (size_t)copied >= sizeof(addr.sun_path)) {
+        fprintf(stderr, "chatd socket path is too long.\n");
+        (void)close(fd);
+        return CHAT_EXIT_DAEMON_UNAVAILABLE;
+    }
+
+    if (connect(fd, (const struct sockaddr *)&addr, sizeof(addr)) != 0) {
+        fprintf(stderr, "chatd unavailable.\n");
+        (void)close(fd);
+        return CHAT_EXIT_DAEMON_UNAVAILABLE;
+    }
+
+    const char command[] = "STATUS\n";
+    ssize_t written = write(fd, command, sizeof(command) - 1u);
+    if (written != (ssize_t)(sizeof(command) - 1u)) {
+        fprintf(stderr, "Could not write to chatd.\n");
+        (void)close(fd);
+        return CHAT_EXIT_DAEMON_UNAVAILABLE;
+    }
+
+    char response[CHAT_IPC_MAX_RESPONSE];
+    ssize_t bytes_read = read(fd, response, sizeof(response) - 1u);
+    if (bytes_read <= 0) {
+        fprintf(stderr, "Could not read from chatd.\n");
+        (void)close(fd);
+        return CHAT_EXIT_DAEMON_UNAVAILABLE;
+    }
+
+    response[bytes_read] = '\0';
+    fputs(response, stdout);
+    (void)close(fd);
+    return CHAT_EXIT_SUCCESS;
 }
 
 static int command_open_chat(const char *peer)

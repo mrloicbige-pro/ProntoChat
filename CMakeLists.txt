@@ -19,6 +19,7 @@ pkg_check_modules(LIBWEBSOCKETS REQUIRED IMPORTED_TARGET libwebsockets)
 
 add_library(chat_common
     common/identity.c
+    common/ipc.c
     common/log.c
     common/protocole.c)
 
@@ -47,7 +48,6 @@ add_executable(chatd
 target_link_libraries(chatd
     PRIVATE
         chat_common
-        PkgConfig::GLIB
         PkgConfig::LIBNICE
         PkgConfig::LIBWEBSOCKETS)
 
@@ -86,4 +86,17 @@ if(BUILD_TESTING)
     target_link_libraries(test_identity PRIVATE chat_common)
     target_compile_options(test_identity PRIVATE -Wall -Wextra -Wpedantic)
     add_test(NAME identity COMMAND test_identity)
+
+    add_executable(test_server_users
+        tests/test_server_users.c
+        server/users.c)
+    target_link_libraries(test_server_users PRIVATE chat_common)
+    target_compile_options(test_server_users PRIVATE -Wall -Wextra -Wpedantic)
+    add_test(NAME server_users COMMAND test_server_users)
+
+    add_executable(test_ipc
+        tests/test_ipc.c)
+    target_link_libraries(test_ipc PRIVATE chat_common)
+    target_compile_options(test_ipc PRIVATE -Wall -Wextra -Wpedantic)
+    add_test(NAME ipc COMMAND test_ipc)
 endif()
