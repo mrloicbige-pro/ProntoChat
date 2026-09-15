@@ -87,3 +87,54 @@ OFFLINE alex
 
 The socket file is created with mode `0600` and removed when `chatd` exits
 normally.
+
+`OPEN_CHAT <username>` is also accepted by `chatd`. It sends a server-backed
+`chat_request` when the daemon is online and keeps the CLI socket open until the
+peer accepts or the server reports the peer offline:
+
+```text
+USER_OFFLINE nathan
+USER_ONLINE nathan
+ERROR daemon_not_online
+```
+
+The CLI maps `USER_ONLINE` to the current step-7 limitation:
+`<peer> is online, but the connection could not be established.` ICE is the next
+missing piece.
+
+## Signalling Relay
+
+The control server now relays authenticated signalling JSON between online
+users. Supported message types:
+
+```text
+chat_request
+chat_accept
+chat_reject
+ice_credentials
+ice_candidate
+ice_done
+ice_gathering_done
+chat_end
+chat_cancel
+```
+
+Every relayed message must include:
+
+```json
+{
+  "type": "chat_request",
+  "from": "alex",
+  "to": "nathan",
+  "session_id": "random-session-id"
+}
+```
+
+The server verifies that `from` matches the authenticated WebSocket session
+before forwarding. If the destination is unknown or offline, the sender receives
+`{"type":"error","code":"peer_offline"}`. The server does not inspect ICE payload
+fields beyond the routing metadata and still never receives chat plaintext.
+
+`chatd` currently accepts incoming `chat_request` automatically by replying with
+`chat_accept`, which matches the V1 shortcut before contact prompts and ICE are
+implemented.

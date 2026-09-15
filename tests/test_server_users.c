@@ -21,17 +21,20 @@ static void test_register_find_and_presence(void)
     assert(memcmp(alex->identity_pk, public_key, sizeof(public_key)) == 0);
 
     struct lws *fake_wsi = (struct lws *)(void *)0x1;
-    assert(chat_server_users_set_online(&users, "alex", fake_wsi) == CHAT_SERVER_USERS_OK);
+    int fake_session = 42;
+    assert(chat_server_users_set_online(&users, "alex", fake_wsi, &fake_session) == CHAT_SERVER_USERS_OK);
     alex = chat_server_users_find(&users, "alex");
     assert(alex != NULL);
     assert(alex->online == 1);
     assert(alex->wsi == fake_wsi);
+    assert(alex->session == &fake_session);
 
     chat_server_users_set_offline_by_wsi(&users, fake_wsi);
     alex = chat_server_users_find(&users, "alex");
     assert(alex != NULL);
     assert(alex->online == 0);
     assert(alex->wsi == NULL);
+    assert(alex->session == NULL);
 }
 
 int main(void)

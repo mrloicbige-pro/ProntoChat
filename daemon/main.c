@@ -7,6 +7,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <libwebsockets.h>
+#include <pthread.h>
 #include <signal.h>
 #include <stdio.h>
 #include <string.h>
@@ -23,6 +24,8 @@
 #define CHATD_HEX_SIGNATURE_LEN (crypto_sign_BYTES * 2u + 1u)
 #define CHATD_CHALLENGE_BYTES 32u
 #define CHATD_HEX_CHALLENGE_LEN (CHATD_CHALLENGE_BYTES * 2u + 1u)
+#define CHATD_SESSION_ID_BYTES 16u
+#define CHATD_SESSION_ID_HEX_LEN (CHATD_SESSION_ID_BYTES * 2u + 1u)
 
 typedef enum {
     CHATD_PHASE_REGISTER,
@@ -34,6 +37,7 @@ typedef enum {
 
 typedef struct {
     chat_identity_t identity;
+    struct lws *control_wsi;
     chatd_phase_t phase;
     unsigned char challenge[CHATD_CHALLENGE_BYTES];
     int has_challenge;
@@ -41,6 +45,11 @@ typedef struct {
     int should_reconnect;
     time_t next_reconnect_at;
     int ipc_fd;
+    pthread_mutex_t lock;
+    pthread_t ipc_thread;
+    int ipc_thread_started;
+    int lookup_client_fd;
+    char lookup_peer[CHAT_USERNAME_MAX_LEN + 1u];
     char ipc_socket_path[sizeof(((struct sockaddr_un *)0)->sun_path)];
     unsigned char pending[LWS_PRE + CHATD_MAX_JSON_SIZE];
     size_t pending_len;
@@ -122,10 +131,26 @@ static int queue_json(struct lws *wsi, chatd_state_t *state, const char *json)
         return -1;
     }
 
+    pthread_mutex_lock(&state->lock);
+    if (state->pending_len != 0u) {
+        pthread_mutex_unlock(&state->lock);
+        return -1;
+    }
     memcpy(&state->pending[LWS_PRE], json, len);
     state->pending_len = len;
-    (void)lws_callback_on_writable(wsi);
+    pthread_mutex_unlock(&state->lock);
+
+    (void)lws_callback_on_writable_all_protocol(lws_get_context(wsi), lws_get_protocol(wsi));
+    lws_cancel_service_pt(wsi);
     return 0;
+}
+
+static int has_pending_control_message(chatd_state_t *state)
+{
+    pthread_mutex_lock(&state->lock);
+    int has_pending = state->pending_len != 0u;
+    pthread_mutex_unlock(&state->lock);
+    return has_pending;
 }
 
 static int queue_register(struct lws *wsi, chatd_state_t *state)
@@ -190,6 +215,147 @@ static int queue_auth_response(struct lws *wsi, chatd_state_t *state)
     return queue_json(wsi, state, json);
 }
 
+static int json_bool_is_true(const char *json, const char *key)
+{
+    char pattern[64];
+    int pattern_len = snprintf(pattern, sizeof(pattern), "\"%s\"", key);
+    if (pattern_len < 0 || (size_t)pattern_len >= sizeof(pattern)) {
+        return 0;
+    }
+
+    const char *cursor = strstr(json, pattern);
+    if (cursor == NULL) {
+        return 0;
+    }
+
+    cursor += pattern_len;
+    while (*cursor == ' ' || *cursor == '\t' || *cursor == '\r' || *cursor == '\n') {
+        ++cursor;
+    }
+    if (*cursor != ':') {
+        return 0;
+    }
+    ++cursor;
+    while (*cursor == ' ' || *cursor == '\t' || *cursor == '\r' || *cursor == '\n') {
+        ++cursor;
+    }
+
+    return strncmp(cursor, "true", 4u) == 0;
+}
+
+static int queue_chat_accept(struct lws *wsi,
+                             chatd_state_t *state,
+                             const char *peer,
+                             const char *session_id)
+{
+    char json[256];
+    int written = snprintf(json,
+                           sizeof(json),
+                           "{\"type\":\"chat_accept\",\"from\":\"%s\",\"to\":\"%s\",\"session_id\":\"%s\"}",
+                           state->identity.username,
+                           peer,
+                           session_id);
+    if (written < 0 || (size_t)written >= sizeof(json)) {
+        return -1;
+    }
+
+    return queue_json(wsi, state, json);
+}
+
+static int queue_chat_request(struct lws *wsi, chatd_state_t *state, const char *peer)
+{
+    unsigned char session_id_bytes[CHATD_SESSION_ID_BYTES];
+    char session_id_hex[CHATD_SESSION_ID_HEX_LEN];
+    randombytes_buf(session_id_bytes, sizeof(session_id_bytes));
+    (void)sodium_bin2hex(session_id_hex,
+                         sizeof(session_id_hex),
+                         session_id_bytes,
+                         sizeof(session_id_bytes));
+    sodium_memzero(session_id_bytes, sizeof(session_id_bytes));
+
+    char json[256];
+    int written = snprintf(json,
+                           sizeof(json),
+                           "{\"type\":\"chat_request\",\"from\":\"%s\",\"to\":\"%s\",\"session_id\":\"%s\"}",
+                           state->identity.username,
+                           peer,
+                           session_id_hex);
+    if (written < 0 || (size_t)written >= sizeof(json)) {
+        return -1;
+    }
+
+    return queue_json(wsi, state, json);
+}
+
+static int handle_chat_request(struct lws *wsi, chatd_state_t *state, const char *json)
+{
+    char from[CHAT_USERNAME_MAX_LEN + 1u];
+    char to[CHAT_USERNAME_MAX_LEN + 1u];
+    char session_id[128];
+
+    if (!json_get_string(json, "from", from, sizeof(from))
+        || !json_get_string(json, "to", to, sizeof(to))
+        || !json_get_string(json, "session_id", session_id, sizeof(session_id))
+        || strcmp(to, state->identity.username) != 0
+        || !chat_username_is_valid(from)
+        || session_id[0] == '\0') {
+        chat_log(CHAT_LOG_WARN, "invalid chat_request received");
+        return 0;
+    }
+
+    chat_log(CHAT_LOG_INFO, "incoming chat request from %s", from);
+    return queue_chat_accept(wsi, state, from, session_id);
+}
+
+static void close_lookup_client(chatd_state_t *state)
+{
+    if (state->lookup_client_fd >= 0) {
+        (void)close(state->lookup_client_fd);
+        state->lookup_client_fd = -1;
+    }
+    state->lookup_peer[0] = '\0';
+}
+
+static void write_lookup_response(chatd_state_t *state, const char *prefix, const char *username)
+{
+    if (state->lookup_client_fd < 0) {
+        return;
+    }
+
+    char response[CHAT_IPC_MAX_RESPONSE];
+    int written = snprintf(response, sizeof(response), "%s %s\n", prefix, username);
+    if (written > 0 && (size_t)written < sizeof(response)) {
+        (void)write(state->lookup_client_fd, response, (size_t)written);
+    }
+
+    close_lookup_client(state);
+}
+
+static int handle_user_status(chatd_state_t *state, const char *json)
+{
+    if (state->lookup_client_fd < 0) {
+        return 0;
+    }
+
+    char username[CHAT_USERNAME_MAX_LEN + 1u];
+    if (!json_get_string(json, "username", username, sizeof(username))
+        || strcmp(username, state->lookup_peer) != 0) {
+        return 0;
+    }
+
+    int known = json_bool_is_true(json, "known");
+    int online = json_bool_is_true(json, "online");
+    if (!known || !online) {
+        chat_log(CHAT_LOG_INFO, "lookup result: %s offline", username);
+        write_lookup_response(state, "USER_OFFLINE", username);
+        return 0;
+    }
+
+    chat_log(CHAT_LOG_INFO, "lookup result: %s online", username);
+    write_lookup_response(state, "USER_ONLINE", username);
+    return 0;
+}
+
 static int handle_receive(struct lws *wsi, chatd_state_t *state, const char *json)
 {
     char type[32];
@@ -207,6 +373,15 @@ static int handle_receive(struct lws *wsi, chatd_state_t *state, const char *jso
         if (state->phase == CHATD_PHASE_REGISTER && strcmp(code, "user already exists") == 0) {
             state->phase = CHATD_PHASE_HELLO;
             return queue_hello(wsi, state);
+        }
+
+        if (state->lookup_client_fd >= 0 && strcmp(code, "peer_offline") == 0) {
+            write_lookup_response(state, "USER_OFFLINE", state->lookup_peer);
+            return 0;
+        }
+
+        if (state->lookup_client_fd >= 0) {
+            write_lookup_response(state, "ERROR", code);
         }
 
         chat_log(CHAT_LOG_ERROR, "control server error: %s", code);
@@ -241,6 +416,39 @@ static int handle_receive(struct lws *wsi, chatd_state_t *state, const char *jso
         return 0;
     }
 
+    if (strcmp(type, "user_status") == 0) {
+        return handle_user_status(state, json);
+    }
+
+    if (strcmp(type, "chat_request") == 0) {
+        return handle_chat_request(wsi, state, json);
+    }
+
+    if (strcmp(type, "chat_accept") == 0) {
+        char from[CHAT_USERNAME_MAX_LEN + 1u];
+        char to[CHAT_USERNAME_MAX_LEN + 1u];
+        if (state->lookup_client_fd >= 0
+            && json_get_string(json, "from", from, sizeof(from))
+            && json_get_string(json, "to", to, sizeof(to))
+            && strcmp(from, state->lookup_peer) == 0
+            && strcmp(to, state->identity.username) == 0) {
+            write_lookup_response(state, "USER_ONLINE", from);
+        }
+        chat_log(CHAT_LOG_INFO, "received signaling message: %s", type);
+        return 0;
+    }
+
+    if (strcmp(type, "chat_reject") == 0
+        || strcmp(type, "ice_credentials") == 0
+        || strcmp(type, "ice_candidate") == 0
+        || strcmp(type, "ice_done") == 0
+        || strcmp(type, "ice_gathering_done") == 0
+        || strcmp(type, "chat_end") == 0
+        || strcmp(type, "chat_cancel") == 0) {
+        chat_log(CHAT_LOG_INFO, "received signaling message: %s", type);
+        return 0;
+    }
+
     chat_log(CHAT_LOG_DEBUG, "ignored server message in current state: %s", type);
     return 0;
 }
@@ -255,6 +463,7 @@ static int callback_chatd_control(struct lws *wsi,
 
     switch (reason) {
     case LWS_CALLBACK_CLIENT_ESTABLISHED:
+        state->control_wsi = wsi;
         state->connected = 1;
         state->phase = CHATD_PHASE_REGISTER;
         chat_log(CHAT_LOG_INFO, "connected to control server");
@@ -276,32 +485,45 @@ static int callback_chatd_control(struct lws *wsi,
     }
 
     case LWS_CALLBACK_CLIENT_WRITEABLE:
-        if (state->pending_len == 0u) {
+        pthread_mutex_lock(&state->lock);
+        size_t pending_len = state->pending_len;
+        if (pending_len == 0u) {
+            pthread_mutex_unlock(&state->lock);
             return 0;
         }
 
         if (lws_write(wsi,
                       &state->pending[LWS_PRE],
-                      state->pending_len,
-                      LWS_WRITE_TEXT) < (int)state->pending_len) {
+                      pending_len,
+                      LWS_WRITE_TEXT) < (int)pending_len) {
+            pthread_mutex_unlock(&state->lock);
             state->phase = CHATD_PHASE_FAILED;
             return -1;
         }
         state->pending_len = 0u;
+        pthread_mutex_unlock(&state->lock);
         return 0;
 
     case LWS_CALLBACK_CLIENT_CONNECTION_ERROR:
         chat_log(CHAT_LOG_WARN, "control server connection attempt reported an error");
+        state->control_wsi = NULL;
         state->connected = 0;
         state->should_reconnect = 1;
         state->next_reconnect_at = time(NULL) + CHATD_RECONNECT_SECONDS;
+        if (state->lookup_client_fd >= 0) {
+            write_lookup_response(state, "ERROR", "server_unavailable");
+        }
         return 0;
 
     case LWS_CALLBACK_CLIENT_CLOSED:
         chat_log(CHAT_LOG_WARN, "control server connection closed");
+        state->control_wsi = NULL;
         state->connected = 0;
         state->should_reconnect = 1;
         state->next_reconnect_at = time(NULL) + CHATD_RECONNECT_SECONDS;
+        if (state->lookup_client_fd >= 0) {
+            write_lookup_response(state, "ERROR", "server_disconnected");
+        }
         if (state->has_challenge) {
             sodium_memzero(state->challenge, sizeof(state->challenge));
             state->has_challenge = 0;
@@ -355,16 +577,6 @@ static struct lws *connect_control_server(struct lws_context *context,
     return lws_client_connect_via_info(&connect_info);
 }
 
-static int set_nonblocking(int fd)
-{
-    int flags = fcntl(fd, F_GETFL, 0);
-    if (flags < 0) {
-        return -1;
-    }
-
-    return fcntl(fd, F_SETFL, flags | O_NONBLOCK);
-}
-
 static int start_ipc_server(chatd_state_t *state)
 {
     if (chat_ipc_socket_path(state->ipc_socket_path, sizeof(state->ipc_socket_path)) != CHAT_IPC_OK) {
@@ -375,12 +587,6 @@ static int start_ipc_server(chatd_state_t *state)
     int fd = socket(AF_UNIX, SOCK_STREAM, 0);
     if (fd < 0) {
         chat_log(CHAT_LOG_ERROR, "failed to create IPC socket: %s", strerror(errno));
-        return -1;
-    }
-
-    if (set_nonblocking(fd) != 0) {
-        chat_log(CHAT_LOG_ERROR, "failed to set IPC socket nonblocking");
-        (void)close(fd);
         return -1;
     }
 
@@ -419,18 +625,23 @@ static int start_ipc_server(chatd_state_t *state)
 static void write_ipc_status(int client_fd, const chatd_state_t *state)
 {
     const char *status = "OFFLINE";
+    char username[CHAT_USERNAME_MAX_LEN + 1u];
+
+    pthread_mutex_lock((pthread_mutex_t *)&state->lock);
     if (state->phase == CHATD_PHASE_ONLINE) {
         status = "ONLINE";
     } else if (state->connected) {
         status = "CONNECTING";
     }
+    (void)snprintf(username, sizeof(username), "%s", state->identity.username);
+    pthread_mutex_unlock((pthread_mutex_t *)&state->lock);
 
     char response[CHAT_IPC_MAX_RESPONSE];
     int written = snprintf(response,
                            sizeof(response),
                            "%s %s\n",
                            status,
-                           state->identity.username);
+                           username);
     if (written < 0 || (size_t)written >= sizeof(response)) {
         return;
     }
@@ -438,22 +649,78 @@ static void write_ipc_status(int client_fd, const chatd_state_t *state)
     (void)write(client_fd, response, (size_t)written);
 }
 
-static void handle_ipc_client(int client_fd, const chatd_state_t *state)
+static int handle_open_chat_command(int client_fd, chatd_state_t *state, const char *peer)
+{
+    if (!chat_username_is_valid(peer)) {
+        const char response[] = "ERROR invalid_username\n";
+        (void)write(client_fd, response, sizeof(response) - 1u);
+        return 0;
+    }
+
+    pthread_mutex_lock(&state->lock);
+    int online = state->phase == CHATD_PHASE_ONLINE && state->control_wsi != NULL;
+    int is_self = strcmp(peer, state->identity.username) == 0;
+    pthread_mutex_unlock(&state->lock);
+
+    if (!online) {
+        const char response[] = "ERROR daemon_not_online\n";
+        (void)write(client_fd, response, sizeof(response) - 1u);
+        return 0;
+    }
+
+    if (is_self) {
+        char response[CHAT_IPC_MAX_RESPONSE];
+        int written = snprintf(response, sizeof(response), "USER_ONLINE %s\n", peer);
+        if (written > 0 && (size_t)written < sizeof(response)) {
+            (void)write(client_fd, response, (size_t)written);
+        }
+        return 0;
+    }
+
+    if (state->lookup_client_fd >= 0 || has_pending_control_message(state)) {
+        const char response[] = "ERROR busy\n";
+        (void)write(client_fd, response, sizeof(response) - 1u);
+        return 0;
+    }
+
+    int copied = snprintf(state->lookup_peer, sizeof(state->lookup_peer), "%s", peer);
+    if (copied < 0 || (size_t)copied >= sizeof(state->lookup_peer)) {
+        const char response[] = "ERROR invalid_username\n";
+        (void)write(client_fd, response, sizeof(response) - 1u);
+        return 0;
+    }
+
+    state->lookup_client_fd = client_fd;
+    if (queue_chat_request(state->control_wsi, state, peer) != 0) {
+        write_lookup_response(state, "ERROR", "chat_request_failed");
+        return 0;
+    }
+
+    return 1;
+}
+
+static int handle_ipc_client(int client_fd, chatd_state_t *state)
 {
     char command[CHAT_IPC_MAX_COMMAND];
     ssize_t bytes_read = read(client_fd, command, sizeof(command) - 1u);
     if (bytes_read <= 0) {
-        return;
+        return 0;
     }
 
     command[bytes_read] = '\0';
     if (strcmp(command, "STATUS\n") == 0 || strcmp(command, "STATUS") == 0) {
         write_ipc_status(client_fd, state);
-        return;
+        return 0;
+    }
+
+    char peer[CHAT_USERNAME_MAX_LEN + 2u];
+    if (sscanf(command, "OPEN_CHAT %33s", peer) == 1) {
+        return handle_open_chat_command(client_fd, state, peer);
     }
 
     const char response[] = "ERROR unknown_command\n";
     (void)write(client_fd, response, sizeof(response) - 1u);
+    return 0;
 }
 
 static void service_ipc(chatd_state_t *state)
@@ -461,15 +728,28 @@ static void service_ipc(chatd_state_t *state)
     for (;;) {
         int client_fd = accept(state->ipc_fd, NULL, NULL);
         if (client_fd < 0) {
-            if (errno != EAGAIN && errno != EWOULDBLOCK) {
-                chat_log(CHAT_LOG_WARN, "IPC accept failed: %s", strerror(errno));
+            if (g_interrupted && (errno == EBADF || errno == EINVAL)) {
+                return;
             }
+            chat_log(CHAT_LOG_WARN, "IPC accept failed: %s", strerror(errno));
             return;
         }
 
-        handle_ipc_client(client_fd, state);
-        (void)close(client_fd);
+        int keep_open = handle_ipc_client(client_fd, state);
+        if (!keep_open) {
+            (void)close(client_fd);
+        }
     }
+}
+
+static void *ipc_thread_main(void *arg)
+{
+    chatd_state_t *state = arg;
+    while (!g_interrupted && state->phase != CHATD_PHASE_FAILED) {
+        service_ipc(state);
+    }
+
+    return NULL;
 }
 
 int main(int argc, char **argv)
@@ -485,10 +765,16 @@ int main(int argc, char **argv)
     chatd_state_t state;
     memset(&state, 0, sizeof(state));
     state.ipc_fd = -1;
+    state.lookup_client_fd = -1;
+    if (pthread_mutex_init(&state.lock, NULL) != 0) {
+        chat_log(CHAT_LOG_ERROR, "failed to initialize daemon lock");
+        return 1;
+    }
     chat_identity_result_t identity_result = chat_identity_load(&state.identity);
     if (identity_result != CHAT_IDENTITY_OK) {
         chat_log(CHAT_LOG_ERROR, "failed to load identity: %s",
                  chat_identity_result_name(identity_result));
+        pthread_mutex_destroy(&state.lock);
         return 1;
     }
 
@@ -498,6 +784,7 @@ int main(int argc, char **argv)
         chat_log(CHAT_LOG_ERROR, "failed to load server_url: %s",
                  chat_identity_result_name(identity_result));
         chat_identity_wipe(&state.identity);
+        pthread_mutex_destroy(&state.lock);
         return 1;
     }
 
@@ -506,6 +793,7 @@ int main(int argc, char **argv)
     if (copied < 0 || (size_t)copied >= sizeof(server_url_for_log)) {
         chat_log(CHAT_LOG_ERROR, "server_url is too long");
         chat_identity_wipe(&state.identity);
+        pthread_mutex_destroy(&state.lock);
         return 1;
     }
 
@@ -516,6 +804,7 @@ int main(int argc, char **argv)
     if (parse_server_url(server_url, &protocol, &address, &port, &path) != 0) {
         chat_log(CHAT_LOG_ERROR, "invalid server_url");
         chat_identity_wipe(&state.identity);
+        pthread_mutex_destroy(&state.lock);
         return 1;
     }
 
@@ -542,6 +831,7 @@ int main(int argc, char **argv)
     if (context == NULL) {
         chat_log(CHAT_LOG_ERROR, "failed to create libwebsockets context");
         chat_identity_wipe(&state.identity);
+        pthread_mutex_destroy(&state.lock);
         return 1;
     }
 
@@ -549,35 +839,62 @@ int main(int argc, char **argv)
         chat_log(CHAT_LOG_ERROR, "failed to start control server connection");
         lws_context_destroy(context);
         chat_identity_wipe(&state.identity);
+        pthread_mutex_destroy(&state.lock);
         return 1;
     }
 
     if (start_ipc_server(&state) != 0) {
         lws_context_destroy(context);
         chat_identity_wipe(&state.identity);
+        pthread_mutex_destroy(&state.lock);
         return 1;
     }
+
+    if (pthread_create(&state.ipc_thread, NULL, ipc_thread_main, &state) != 0) {
+        chat_log(CHAT_LOG_ERROR, "failed to start IPC thread");
+        (void)close(state.ipc_fd);
+        (void)unlink(state.ipc_socket_path);
+        lws_context_destroy(context);
+        chat_identity_wipe(&state.identity);
+        pthread_mutex_destroy(&state.lock);
+        return 1;
+    }
+    state.ipc_thread_started = 1;
 
     (void)signal(SIGINT, handle_signal);
     (void)signal(SIGTERM, handle_signal);
 
     chat_log(CHAT_LOG_INFO, "chatd connecting to %s", server_url_for_log);
     while (!g_interrupted && state.phase != CHATD_PHASE_FAILED) {
-        (void)lws_service(context, 50);
-        service_ipc(&state);
+        if (has_pending_control_message(&state) && state.control_wsi != NULL) {
+            (void)lws_callback_on_writable_all_protocol(lws_get_context(state.control_wsi),
+                                                        lws_get_protocol(state.control_wsi));
+            (void)lws_service(context, 0);
+        }
+        (void)lws_service(context, 0);
         if (state.should_reconnect && !state.connected && time(NULL) >= state.next_reconnect_at) {
             chat_log(CHAT_LOG_INFO, "reconnecting to control server");
             if (connect_control_server(context, protocol, address, port, path, &state) == NULL) {
                 state.next_reconnect_at = time(NULL) + CHATD_RECONNECT_SECONDS;
             }
         }
+
+        struct timespec sleep_time = {.tv_sec = 0, .tv_nsec = 10 * 1000 * 1000};
+        (void)nanosleep(&sleep_time, NULL);
     }
 
+    g_interrupted = 1;
     if (state.ipc_fd >= 0) {
+        (void)shutdown(state.ipc_fd, SHUT_RDWR);
         (void)close(state.ipc_fd);
         (void)unlink(state.ipc_socket_path);
     }
+    if (state.ipc_thread_started) {
+        (void)pthread_join(state.ipc_thread, NULL);
+    }
+    close_lookup_client(&state);
     lws_context_destroy(context);
     chat_identity_wipe(&state.identity);
+    pthread_mutex_destroy(&state.lock);
     return state.phase == CHATD_PHASE_FAILED ? 1 : 0;
 }

@@ -33,6 +33,7 @@ chat_server_users_result_t chat_server_users_register(
     (void)snprintf(user->username, sizeof(user->username), "%s", username);
     memcpy(user->identity_pk, identity_pk, crypto_sign_PUBLICKEYBYTES);
     user->wsi = NULL;
+    user->session = NULL;
     user->online = 0;
 
     return CHAT_SERVER_USERS_OK;
@@ -72,7 +73,8 @@ chat_server_user_t *chat_server_users_find_mut(chat_server_users_t *registry,
 
 chat_server_users_result_t chat_server_users_set_online(chat_server_users_t *registry,
                                                         const char *username,
-                                                        struct lws *wsi)
+                                                        struct lws *wsi,
+                                                        void *session)
 {
     chat_server_user_t *user = chat_server_users_find_mut(registry, username);
     if (user == NULL) {
@@ -81,6 +83,7 @@ chat_server_users_result_t chat_server_users_set_online(chat_server_users_t *reg
 
     user->online = 1;
     user->wsi = wsi;
+    user->session = session;
     return CHAT_SERVER_USERS_OK;
 }
 
@@ -94,6 +97,7 @@ void chat_server_users_set_offline_by_wsi(chat_server_users_t *registry, struct 
         if (registry->users[i].wsi == wsi) {
             registry->users[i].online = 0;
             registry->users[i].wsi = NULL;
+            registry->users[i].session = NULL;
         }
     }
 }

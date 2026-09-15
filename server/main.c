@@ -15,6 +15,7 @@
 #define CHAT_SERVER_HEX_PUBLIC_KEY_LEN (crypto_sign_PUBLICKEYBYTES * 2u + 1u)
 #define CHAT_SERVER_HEX_SIGNATURE_LEN (crypto_sign_BYTES * 2u + 1u)
 #define CHAT_SERVER_HEX_CHALLENGE_LEN (CHAT_SERVER_CHALLENGE_BYTES * 2u + 1u)
+#define CHAT_SERVER_SESSION_ID_MAX 128u
 
 typedef struct {
     chat_server_users_t users;
@@ -108,6 +109,7 @@ static int send_json(struct lws *wsi, chat_server_session_t *session, const char
     memcpy(&session->pending[LWS_PRE], json, length);
     session->pending_len = length;
     (void)lws_callback_on_writable(wsi);
+    lws_cancel_service_pt(wsi);
     return 0;
 }
 
@@ -223,7 +225,8 @@ static int handle_auth_response(struct lws *wsi, chat_server_session_t *session,
 
     chat_server_users_result_t result = chat_server_users_set_online(&session->state->users,
                                                                      session->username,
-                                                                     wsi);
+                                                                     wsi,
+                                                                     session);
     if (result != CHAT_SERVER_USERS_OK) {
         session->authenticated = 0;
         return send_error(wsi, session, chat_server_users_result_name(result));
@@ -231,6 +234,60 @@ static int handle_auth_response(struct lws *wsi, chat_server_session_t *session,
 
     chat_log(CHAT_LOG_INFO, "%s authenticated and online", session->username);
     return send_json(wsi, session, "{\"type\":\"auth_ok\"}");
+}
+
+static int signaling_type_is_supported(const char *type)
+{
+    return strcmp(type, "chat_request") == 0
+        || strcmp(type, "chat_accept") == 0
+        || strcmp(type, "chat_reject") == 0
+        || strcmp(type, "ice_credentials") == 0
+        || strcmp(type, "ice_candidate") == 0
+        || strcmp(type, "ice_done") == 0
+        || strcmp(type, "ice_gathering_done") == 0
+        || strcmp(type, "chat_end") == 0
+        || strcmp(type, "chat_cancel") == 0;
+}
+
+static int handle_signaling_forward(struct lws *wsi,
+                                    chat_server_session_t *session,
+                                    const char *json,
+                                    const char *type)
+{
+    if (!session->authenticated) {
+        return send_error(wsi, session, "authentication_required");
+    }
+
+    char from[CHAT_USERNAME_MAX_LEN + 1u];
+    char to[CHAT_USERNAME_MAX_LEN + 1u];
+    char session_id[CHAT_SERVER_SESSION_ID_MAX];
+    if (!json_get_string(json, "from", from, sizeof(from))
+        || !json_get_string(json, "to", to, sizeof(to))
+        || !json_get_string(json, "session_id", session_id, sizeof(session_id))
+        || !chat_username_is_valid(from)
+        || !chat_username_is_valid(to)
+        || session_id[0] == '\0') {
+        return send_error(wsi, session, "bad_signaling_message");
+    }
+
+    if (strcmp(from, session->username) != 0) {
+        chat_log(CHAT_LOG_WARN, "rejected spoofed %s from %s as %s",
+                 type, from, session->username);
+        return send_error(wsi, session, "from_mismatch");
+    }
+
+    chat_server_user_t *target = chat_server_users_find_mut(&session->state->users, to);
+    if (target == NULL || !target->online || target->wsi == NULL || target->session == NULL) {
+        return send_error(wsi, session, "peer_offline");
+    }
+
+    chat_server_session_t *target_session = target->session;
+    if (target_session->pending_len != 0u) {
+        return send_error(wsi, session, "peer_busy");
+    }
+
+    chat_log(CHAT_LOG_INFO, "forwarding %s %s -> %s", type, from, to);
+    return send_json(target->wsi, target_session, json);
 }
 
 static int handle_user_lookup(struct lws *wsi, chat_server_session_t *session, const char *json)
@@ -247,6 +304,7 @@ static int handle_user_lookup(struct lws *wsi, chat_server_session_t *session, c
 
     const chat_server_user_t *user = chat_server_users_find(&session->state->users, username);
     if (user == NULL) {
+        chat_log(CHAT_LOG_INFO, "lookup %s: unknown", username);
         char response[160];
         int written = snprintf(response,
                                sizeof(response),
@@ -258,6 +316,7 @@ static int handle_user_lookup(struct lws *wsi, chat_server_session_t *session, c
         return send_json(wsi, session, response);
     }
 
+    chat_log(CHAT_LOG_INFO, "lookup %s: %s", username, user->online ? "online" : "offline");
     char public_key_hex[CHAT_SERVER_HEX_PUBLIC_KEY_LEN];
     (void)sodium_bin2hex(public_key_hex,
                          sizeof(public_key_hex),
@@ -297,6 +356,9 @@ static int handle_message(struct lws *wsi, chat_server_session_t *session, const
     }
     if (strcmp(type, "user_lookup") == 0) {
         return handle_user_lookup(wsi, session, json);
+    }
+    if (signaling_type_is_supported(type)) {
+        return handle_signaling_forward(wsi, session, json, type);
     }
 
     return send_error(wsi, session, "unknown_type");

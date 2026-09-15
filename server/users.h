@@ -23,6 +23,7 @@ typedef struct {
     char username[CHAT_USERNAME_MAX_LEN + 1u];
     unsigned char identity_pk[crypto_sign_PUBLICKEYBYTES];
     struct lws *wsi;
+    void *session;
     int online;
 } chat_server_user_t;
 
@@ -42,7 +43,8 @@ chat_server_user_t *chat_server_users_find_mut(chat_server_users_t *registry,
                                                const char *username);
 chat_server_users_result_t chat_server_users_set_online(chat_server_users_t *registry,
                                                         const char *username,
-                                                        struct lws *wsi);
+                                                        struct lws *wsi,
+                                                        void *session);
 void chat_server_users_set_offline_by_wsi(chat_server_users_t *registry, struct lws *wsi);
 const char *chat_server_users_result_name(chat_server_users_result_t result);
 

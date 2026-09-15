@@ -12,6 +12,7 @@ set(CMAKE_C_EXTENSIONS OFF)
 option(CHAT_ENABLE_SANITIZERS "Build with AddressSanitizer and UBSan" OFF)
 
 find_package(PkgConfig REQUIRED)
+find_package(Threads REQUIRED)
 pkg_check_modules(GLIB REQUIRED IMPORTED_TARGET glib-2.0)
 pkg_check_modules(LIBNICE REQUIRED IMPORTED_TARGET nice)
 pkg_check_modules(LIBSODIUM REQUIRED IMPORTED_TARGET libsodium)
@@ -48,6 +49,7 @@ add_executable(chatd
 target_link_libraries(chatd
     PRIVATE
         chat_common
+        Threads::Threads
         PkgConfig::LIBNICE
         PkgConfig::LIBWEBSOCKETS)
 
