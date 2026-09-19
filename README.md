@@ -116,7 +116,19 @@ launchctl load "$HOME/Library/LaunchAgents/dev.chat.chatd.plist"
 ## Packaging
 
 The Fedora RPM manifest is in `packaging/rpm/prontochat.spec`. After publishing
-the `v0.1.0` source tag, build it with the standard Fedora RPM toolchain.
+the `v0.1.0` source tag, download the source archive and build it with the
+standard Fedora RPM toolchain:
+
+```bash
+rpmdev-setuptree
+spectool -g -R packaging/rpm/prontochat.spec
+rpmbuild -ba packaging/rpm/prontochat.spec
+sudo dnf install --allowerasing \
+    "$HOME"/rpmbuild/RPMS/*/prontochat-[0-9]*.rpm
+```
+
+Fedora's `ppp` package also owns `/usr/bin/chat`. ProntoChat therefore conflicts
+with `ppp`; installing the RPM with `dnf --allowerasing` may remove `ppp`.
 
 The Homebrew Formula is in `packaging/homebrew/prontochat.rb`. Copy it into a
 tap as `Formula/prontochat.rb` after publishing the same source tag, then run:
