@@ -1,9 +1,14 @@
 [Unit]
-Description=chat user daemon
+Description=ProntoChat user daemon
 
 [Service]
-ExecStart=%h/.local/bin/chatd
+Type=simple
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/usr/bin/env chatd
 Restart=on-failure
+RestartSec=2s
+NoNewPrivileges=true
+PrivateTmp=true
 
 [Install]
 WantedBy=default.target

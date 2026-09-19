@@ -10,15 +10,30 @@ set(CMAKE_C_STANDARD_REQUIRED ON)
 set(CMAKE_C_EXTENSIONS OFF)
 
 option(CHAT_ENABLE_SANITIZERS "Build with AddressSanitizer and UBSan" OFF)
+option(CHAT_ENABLE_NETWORK_TESTS "Enable local ICE and end-to-end network tests" OFF)
+
+if(CHAT_ENABLE_SANITIZERS)
+    add_library(chat_sanitizers INTERFACE)
+    target_compile_options(chat_sanitizers
+        INTERFACE
+            -fsanitize=address,undefined
+            -fno-omit-frame-pointer)
+    target_link_options(chat_sanitizers
+        INTERFACE
+            -fsanitize=address,undefined)
+endif()
 
 find_package(PkgConfig REQUIRED)
 find_package(Threads REQUIRED)
+include(GNUInstallDirs)
 pkg_check_modules(GLIB REQUIRED IMPORTED_TARGET glib-2.0)
 pkg_check_modules(LIBNICE REQUIRED IMPORTED_TARGET nice)
 pkg_check_modules(LIBSODIUM REQUIRED IMPORTED_TARGET libsodium)
 pkg_check_modules(LIBWEBSOCKETS REQUIRED IMPORTED_TARGET libwebsockets)
 
 add_library(chat_common
+    common/contacts.c
+    common/crypto.c
     common/identity.c
     common/ipc.c
     common/log.c
@@ -36,6 +51,10 @@ target_link_libraries(chat_common
     PUBLIC
         PkgConfig::LIBSODIUM)
 
+if(CHAT_ENABLE_SANITIZERS)
+    target_link_libraries(chat_common PUBLIC chat_sanitizers)
+endif()
+
 add_executable(chat
     client/main.c)
 
@@ -44,7 +63,8 @@ target_link_libraries(chat
         chat_common)
 
 add_executable(chatd
-    daemon/main.c)
+    daemon/main.c
+    daemon/ice.c)
 
 target_link_libraries(chatd
     PRIVATE
@@ -68,12 +88,14 @@ foreach(target chat chatd chat-server)
             -Wall -Wextra -Wpedantic)
 endforeach()
 
-if(CHAT_ENABLE_SANITIZERS)
-    foreach(target chat_common chat chatd chat-server)
-        target_compile_options(${target} PRIVATE -fsanitize=address,undefined -fno-omit-frame-pointer)
-        target_link_options(${target} PRIVATE -fsanitize=address,undefined)
-    endforeach()
-endif()
+install(TARGETS chat chatd
+    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+
+install(FILES packaging/systemd/chatd.service
+    DESTINATION ${CMAKE_INSTALL_DATADIR}/chat/systemd)
+
+install(FILES packaging/launchd/chatd.plist
+    DESTINATION ${CMAKE_INSTALL_DATADIR}/chat/launchd)
 
 include(CTest)
 if(BUILD_TESTING)
@@ -89,6 +111,18 @@ if(BUILD_TESTING)
     target_compile_options(test_identity PRIVATE -Wall -Wextra -Wpedantic)
     add_test(NAME identity COMMAND test_identity)
 
+    add_executable(test_contacts
+        tests/test_contacts.c)
+    target_link_libraries(test_contacts PRIVATE chat_common)
+    target_compile_options(test_contacts PRIVATE -Wall -Wextra -Wpedantic)
+    add_test(NAME contacts COMMAND test_contacts)
+
+    add_executable(test_crypto
+        tests/test_crypto.c)
+    target_link_libraries(test_crypto PRIVATE chat_common)
+    target_compile_options(test_crypto PRIVATE -Wall -Wextra -Wpedantic)
+    add_test(NAME crypto COMMAND test_crypto)
+
     add_executable(test_server_users
         tests/test_server_users.c
         server/users.c)
@@ -101,4 +135,41 @@ if(BUILD_TESTING)
     target_link_libraries(test_ipc PRIVATE chat_common)
     target_compile_options(test_ipc PRIVATE -Wall -Wextra -Wpedantic)
     add_test(NAME ipc COMMAND test_ipc)
+
+    add_executable(test_ice_loopback
+        tests/test_ice_loopback.c
+        daemon/ice.c)
+    target_link_libraries(test_ice_loopback
+        PRIVATE
+            chat_common
+            PkgConfig::LIBNICE)
+    target_compile_options(test_ice_loopback PRIVATE -Wall -Wextra -Wpedantic)
+
+    if(CHAT_ENABLE_NETWORK_TESTS)
+        find_package(Python3 REQUIRED COMPONENTS Interpreter)
+
+        add_test(NAME ice_loopback COMMAND test_ice_loopback)
+        set_tests_properties(ice_loopback PROPERTIES
+            LABELS "network"
+            TIMEOUT 60)
+
+        foreach(scenario direct offline identity_mismatch control_disconnect)
+            set(e2e_args --build-dir ${CMAKE_BINARY_DIR})
+            if(scenario STREQUAL "offline")
+                list(APPEND e2e_args --expect-offline)
+            elseif(scenario STREQUAL "identity_mismatch")
+                list(APPEND e2e_args --expect-identity-mismatch)
+            elseif(scenario STREQUAL "control_disconnect")
+                list(APPEND e2e_args --disconnect-control)
+            endif()
+
+            add_test(NAME e2e_${scenario}
+                COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/e2e_chat.py ${e2e_args})
+            set_tests_properties(e2e_${scenario} PROPERTIES
+                LABELS "network;e2e"
+                RESOURCE_LOCK "chat_control_port"
+                RUN_SERIAL TRUE
+                TIMEOUT 180)
+        endforeach()
+    endif()
 endif()

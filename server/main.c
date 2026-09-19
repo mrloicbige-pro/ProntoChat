@@ -276,6 +276,28 @@ static int handle_signaling_forward(struct lws *wsi,
         return send_error(wsi, session, "from_mismatch");
     }
 
+    const chat_server_user_t *sender = chat_server_users_find(&session->state->users, from);
+    if (sender == NULL) {
+        return send_error(wsi, session, "unknown_user");
+    }
+
+    if (strcmp(type, "chat_request") == 0 || strcmp(type, "chat_accept") == 0) {
+        char public_key_hex[CHAT_SERVER_HEX_PUBLIC_KEY_LEN];
+        unsigned char public_key[crypto_sign_PUBLICKEYBYTES];
+        if (!json_get_string(json, "public_key", public_key_hex, sizeof(public_key_hex))
+            || !hex_to_bin(public_key_hex, public_key, sizeof(public_key))) {
+            return send_error(wsi, session, "bad_public_key");
+        }
+
+        int matches_identity =
+            sodium_memcmp(public_key, sender->identity_pk, sizeof(public_key)) == 0;
+        sodium_memzero(public_key, sizeof(public_key));
+        if (!matches_identity) {
+            chat_log(CHAT_LOG_WARN, "rejected %s with mismatched public key from %s", type, from);
+            return send_error(wsi, session, "public_key_mismatch");
+        }
+    }
+
     chat_server_user_t *target = chat_server_users_find_mut(&session->state->users, to);
     if (target == NULL || !target->online || target->wsi == NULL || target->session == NULL) {
         return send_error(wsi, session, "peer_offline");

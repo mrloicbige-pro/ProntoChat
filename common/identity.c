@@ -518,6 +518,13 @@ chat_identity_result_t chat_identity_load(chat_identity_t *out_identity)
 
 chat_identity_result_t chat_identity_load_server_url(char *out, size_t out_size)
 {
+    return chat_identity_load_config_value("server_url", out, out_size);
+}
+
+chat_identity_result_t chat_identity_load_config_value(const char *key,
+                                                       char *out,
+                                                       size_t out_size)
+{
     char config_dir[PATH_MAX];
     chat_identity_result_t result = chat_identity_config_dir(config_dir, sizeof(config_dir));
     if (result != CHAT_IDENTITY_OK) {
@@ -530,7 +537,7 @@ chat_identity_result_t chat_identity_load_server_url(char *out, size_t out_size)
         return result;
     }
 
-    return chat_load_quoted_config_value(config_path, "server_url", out, out_size);
+    return chat_load_quoted_config_value(config_path, key, out, out_size);
 }
 
 void chat_identity_wipe(chat_identity_t *identity)

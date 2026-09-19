@@ -4,8 +4,8 @@
 #include <stddef.h>
 
 #define CHAT_SOCKET_PATH_ENV "CHAT_SOCKET_PATH"
-#define CHAT_IPC_MAX_COMMAND 128u
-#define CHAT_IPC_MAX_RESPONSE 256u
+#define CHAT_IPC_MAX_COMMAND 4096u
+#define CHAT_IPC_MAX_RESPONSE 4096u
 
 typedef enum {
     CHAT_IPC_OK = 0,
