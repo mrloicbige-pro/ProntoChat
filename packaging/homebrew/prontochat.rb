@@ -2,7 +2,7 @@ class Prontochat < Formula
   desc "Terminal P2P encrypted messenger"
   homepage "https://github.com/mrloicbige-pro/ProntoChat"
   url "https://github.com/mrloicbige-pro/ProntoChat/archive/refs/tags/v0.1.0.tar.gz"
-  version "0.1.0"
+  version "0.1.1"
 
   depends_on "cmake" => :build
   depends_on "pkg-config" => :build

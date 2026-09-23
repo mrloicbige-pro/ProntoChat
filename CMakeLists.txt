@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.20)
 
 project(chat
-    VERSION 0.1.0
+    VERSION 0.1.1
     DESCRIPTION "Terminal P2P encrypted messenger"
     LANGUAGES C)
 
