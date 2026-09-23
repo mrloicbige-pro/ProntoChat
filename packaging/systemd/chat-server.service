@@ -1,0 +1,19 @@
+[Unit]
+Description=ProntoChat presence server
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/chat-server --port 8787
+Restart=on-failure
+RestartSec=2s
+DynamicUser=true
+NoNewPrivileges=true
+PrivateDevices=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+
+[Install]
+WantedBy=multi-user.target

@@ -69,6 +69,16 @@ cmake --install build --prefix "$HOME/.local"
 This installs `chat` and `chatd`. The development `chat-server` is intentionally
 not installed as part of the client package.
 
+Prebuilt client and server archives can be generated separately:
+
+```bash
+cmake -S . -B build-release -DCMAKE_BUILD_TYPE=Release
+cmake --build build-release --target archives --parallel
+ls build-release/dist/*.tar.gz
+```
+
+Each archive contains its own `README.md` and `install.sh`.
+
 ## Usage
 
 ```bash

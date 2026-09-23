@@ -95,13 +95,50 @@ foreach(target chat chatd chat-server)
 endforeach()
 
 install(TARGETS chat chatd
-    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+    COMPONENT client)
 
 install(FILES packaging/systemd/chatd.service
-    DESTINATION ${CMAKE_INSTALL_DATADIR}/chat/systemd)
+    DESTINATION ${CMAKE_INSTALL_DATADIR}/chat/systemd
+    COMPONENT client)
 
 install(FILES packaging/launchd/chatd.plist
-    DESTINATION ${CMAKE_INSTALL_DATADIR}/chat/launchd)
+    DESTINATION ${CMAKE_INSTALL_DATADIR}/chat/launchd
+    COMPONENT client)
+
+install(TARGETS chat-server
+    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+    COMPONENT server
+    EXCLUDE_FROM_ALL)
+
+install(FILES packaging/systemd/chat-server.service
+    DESTINATION ${CMAKE_INSTALL_DATADIR}/prontochat/systemd
+    COMPONENT server
+    EXCLUDE_FROM_ALL)
+
+install(PROGRAMS packaging/archive/install-client.sh
+    DESTINATION .
+    RENAME install.sh
+    COMPONENT client
+    EXCLUDE_FROM_ALL)
+
+install(FILES packaging/archive/README-client.md
+    DESTINATION .
+    RENAME README.md
+    COMPONENT client
+    EXCLUDE_FROM_ALL)
+
+install(PROGRAMS packaging/archive/install-server.sh
+    DESTINATION .
+    RENAME install.sh
+    COMPONENT server
+    EXCLUDE_FROM_ALL)
+
+install(FILES packaging/archive/README-server.md
+    DESTINATION .
+    RENAME README.md
+    COMPONENT server
+    EXCLUDE_FROM_ALL)
 
 include(CTest)
 if(BUILD_TESTING)
@@ -179,3 +216,22 @@ if(BUILD_TESTING)
         endforeach()
     endif()
 endif()
+
+set(CPACK_GENERATOR "TGZ")
+set(CPACK_ARCHIVE_COMPONENT_INSTALL ON)
+set(CPACK_COMPONENTS_ALL client server)
+set(CPACK_PACKAGE_NAME "prontochat")
+set(CPACK_PACKAGE_VENDOR "ProntoChat")
+set(CPACK_PACKAGE_VERSION "${PROJECT_VERSION}")
+set(CPACK_PACKAGE_DIRECTORY "${CMAKE_BINARY_DIR}/dist")
+set(CPACK_PACKAGE_FILE_NAME
+    "prontochat-${PROJECT_VERSION}-${CMAKE_SYSTEM_NAME}-${CMAKE_SYSTEM_PROCESSOR}")
+set(CPACK_INCLUDE_TOPLEVEL_DIRECTORY ON)
+set(CPACK_COMPONENT_INCLUDE_TOPLEVEL_DIRECTORY ON)
+include(CPack)
+
+add_custom_target(archives
+    COMMAND "${CMAKE_CPACK_COMMAND}" --config "${CMAKE_BINARY_DIR}/CPackConfig.cmake"
+    DEPENDS chat chatd chat-server
+    COMMENT "Building separate ProntoChat client and server archives"
+    VERBATIM)
