@@ -81,6 +81,11 @@ chat fingerprint nathan
 `chat fingerprint <username>` prints the locally pinned identity fingerprint for
 an existing contact.
 
+New identities use `wss://pronto-chat.duckdns.org` automatically. Existing users
+can run `chat config server wss://pronto-chat.duckdns.org` once and then restart
+`chatd`. Package builders can override the default with
+`-DCHAT_DEFAULT_SERVER_URL=wss://chat.example.org` when configuring CMake.
+
 For local multi-user testing on one machine, give each daemon its own config
 directory and IPC socket:
 

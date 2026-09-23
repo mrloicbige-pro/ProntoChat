@@ -11,6 +11,10 @@
 #define CHAT_IDENTITY_FINGERPRINT_LEN (crypto_generichash_BYTES * 3u)
 #define CHAT_IDENTITY_SERVER_URL_MAX 256u
 
+#ifndef CHAT_DEFAULT_SERVER_URL
+#define CHAT_DEFAULT_SERVER_URL "wss://pronto-chat.duckdns.org"
+#endif
+
 typedef enum {
     CHAT_IDENTITY_OK = 0,
     CHAT_IDENTITY_ERR_INVALID_USERNAME = -1,
@@ -19,7 +23,8 @@ typedef enum {
     CHAT_IDENTITY_ERR_IO = -4,
     CHAT_IDENTITY_ERR_BUFFER = -5,
     CHAT_IDENTITY_ERR_NOT_FOUND = -6,
-    CHAT_IDENTITY_ERR_BAD_FILE = -7
+    CHAT_IDENTITY_ERR_BAD_FILE = -7,
+    CHAT_IDENTITY_ERR_INVALID_SERVER_URL = -8
 } chat_identity_result_t;
 
 typedef struct {
@@ -37,6 +42,7 @@ chat_identity_result_t chat_identity_create(const char *username,
                                             size_t fingerprint_out_size);
 chat_identity_result_t chat_identity_load(chat_identity_t *out_identity);
 chat_identity_result_t chat_identity_load_server_url(char *out, size_t out_size);
+chat_identity_result_t chat_identity_set_server_url(const char *server_url);
 chat_identity_result_t chat_identity_load_config_value(const char *key,
                                                        char *out,
                                                        size_t out_size);

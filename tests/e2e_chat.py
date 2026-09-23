@@ -226,6 +226,12 @@ def main():
             [harness.binary("chat"), "init", "nathan"],
             harness.env_for("nathan"),
         )
+        for username in ("alex", "nathan"):
+            harness.run_checked(
+                f"{username}-config-server",
+                [harness.binary("chat"), "config", "server", "ws://127.0.0.1:8787"],
+                harness.env_for(username),
+            )
         if args.expect_identity_mismatch:
             contacts_path = harness.tmp / "alex" / "contacts.db"
             contacts_path.write_text(f'nathan {bytes(32).hex()}\n', encoding="ascii")

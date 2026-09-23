@@ -11,6 +11,8 @@ set(CMAKE_C_EXTENSIONS OFF)
 
 option(CHAT_ENABLE_SANITIZERS "Build with AddressSanitizer and UBSan" OFF)
 option(CHAT_ENABLE_NETWORK_TESTS "Enable local ICE and end-to-end network tests" OFF)
+set(CHAT_DEFAULT_SERVER_URL "wss://pronto-chat.duckdns.org" CACHE STRING
+    "Default ProntoChat control server URL")
 
 if(CHAT_ENABLE_SANITIZERS)
     add_library(chat_sanitizers INTERFACE)
@@ -42,6 +44,10 @@ add_library(chat_common
 target_include_directories(chat_common
     PUBLIC
         ${CMAKE_CURRENT_SOURCE_DIR})
+
+target_compile_definitions(chat_common
+    PUBLIC
+        CHAT_DEFAULT_SERVER_URL="${CHAT_DEFAULT_SERVER_URL}")
 
 target_compile_options(chat_common
     PRIVATE

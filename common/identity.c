@@ -190,11 +190,12 @@ static chat_identity_result_t chat_write_new_file(const char *path,
 
 static chat_identity_result_t chat_write_config_file(const char *path, const char *username)
 {
-    char content[128];
+    char content[512];
     int written = snprintf(content,
                            sizeof(content),
-                           "username = \"%s\"\nserver_url = \"ws://127.0.0.1:8787\"\n",
-                           username);
+                           "username = \"%s\"\nserver_url = \"%s\"\n",
+                           username,
+                           CHAT_DEFAULT_SERVER_URL);
     if (written < 0 || (size_t)written >= sizeof(content)) {
         return CHAT_IDENTITY_ERR_BUFFER;
     }
@@ -276,6 +277,59 @@ static chat_identity_result_t chat_load_quoted_config_value(const char *path,
     return CHAT_IDENTITY_ERR_NOT_FOUND;
 }
 
+static int chat_config_line_has_key(const char *line, const char *key)
+{
+    while (*line == ' ' || *line == '\t') {
+        ++line;
+    }
+
+    size_t key_length = strlen(key);
+    if (strncmp(line, key, key_length) != 0) {
+        return 0;
+    }
+
+    line += key_length;
+    while (*line == ' ' || *line == '\t') {
+        ++line;
+    }
+    return *line == '=';
+}
+
+static int chat_server_url_is_valid(const char *server_url)
+{
+    if (server_url == NULL) {
+        return 0;
+    }
+
+    size_t length = strlen(server_url);
+    if (length == 0u || length >= CHAT_IDENTITY_SERVER_URL_MAX) {
+        return 0;
+    }
+
+    const char *authority = NULL;
+    if (strncmp(server_url, "ws://", 5u) == 0) {
+        authority = server_url + 5u;
+    } else if (strncmp(server_url, "wss://", 6u) == 0) {
+        authority = server_url + 6u;
+    } else {
+        return 0;
+    }
+
+    if (*authority == '\0' || *authority == '/' || *authority == '?' || *authority == '#') {
+        return 0;
+    }
+
+    for (const unsigned char *cursor = (const unsigned char *)server_url;
+         *cursor != '\0';
+         ++cursor) {
+        if (*cursor <= 0x20u || *cursor == 0x7fu || *cursor == '"' || *cursor == '\\') {
+            return 0;
+        }
+    }
+
+    return 1;
+}
+
 const char *chat_identity_result_name(chat_identity_result_t result)
 {
     switch (result) {
@@ -295,6 +349,8 @@ const char *chat_identity_result_name(chat_identity_result_t result)
         return "identity not found";
     case CHAT_IDENTITY_ERR_BAD_FILE:
         return "invalid identity file";
+    case CHAT_IDENTITY_ERR_INVALID_SERVER_URL:
+        return "invalid server URL";
     }
 
     return "unknown identity error";
@@ -519,6 +575,119 @@ chat_identity_result_t chat_identity_load(chat_identity_t *out_identity)
 chat_identity_result_t chat_identity_load_server_url(char *out, size_t out_size)
 {
     return chat_identity_load_config_value("server_url", out, out_size);
+}
+
+chat_identity_result_t chat_identity_set_server_url(const char *server_url)
+{
+    if (!chat_server_url_is_valid(server_url)) {
+        return CHAT_IDENTITY_ERR_INVALID_SERVER_URL;
+    }
+
+    char config_dir[PATH_MAX];
+    chat_identity_result_t result = chat_identity_config_dir(config_dir, sizeof(config_dir));
+    if (result != CHAT_IDENTITY_OK) {
+        return result;
+    }
+
+    char config_path[PATH_MAX];
+    result = chat_join_path(config_path, sizeof(config_path), config_dir, CHAT_CONFIG_FILE);
+    if (result != CHAT_IDENTITY_OK) {
+        return result;
+    }
+
+    FILE *input = fopen(config_path, "r");
+    if (input == NULL) {
+        return errno == ENOENT ? CHAT_IDENTITY_ERR_NOT_FOUND : CHAT_IDENTITY_ERR_IO;
+    }
+
+    char temp_path[PATH_MAX];
+    int path_length = snprintf(temp_path, sizeof(temp_path), "%s.tmp.XXXXXX", config_path);
+    if (path_length < 0 || (size_t)path_length >= sizeof(temp_path)) {
+        (void)fclose(input);
+        return CHAT_IDENTITY_ERR_BUFFER;
+    }
+
+    int temp_fd = mkstemp(temp_path);
+    if (temp_fd < 0) {
+        (void)fclose(input);
+        return CHAT_IDENTITY_ERR_IO;
+    }
+    if (fchmod(temp_fd, 0600) != 0) {
+        (void)close(temp_fd);
+        (void)unlink(temp_path);
+        (void)fclose(input);
+        return CHAT_IDENTITY_ERR_IO;
+    }
+
+    FILE *output = fdopen(temp_fd, "w");
+    if (output == NULL) {
+        (void)close(temp_fd);
+        (void)unlink(temp_path);
+        (void)fclose(input);
+        return CHAT_IDENTITY_ERR_IO;
+    }
+
+    char *line = NULL;
+    size_t capacity = 0u;
+    int server_url_written = 0;
+    int had_content = 0;
+    int last_line_had_newline = 1;
+    result = CHAT_IDENTITY_OK;
+
+    while (getline(&line, &capacity, input) >= 0) {
+        had_content = 1;
+        last_line_had_newline = line[0] != '\0' && line[strlen(line) - 1u] == '\n';
+
+        if (chat_config_line_has_key(line, "server_url")) {
+            if (!server_url_written
+                && fprintf(output, "server_url = \"%s\"\n", server_url) < 0) {
+                result = CHAT_IDENTITY_ERR_IO;
+                break;
+            }
+            server_url_written = 1;
+            continue;
+        }
+
+        if (fputs(line, output) == EOF) {
+            result = CHAT_IDENTITY_ERR_IO;
+            break;
+        }
+    }
+
+    if (result == CHAT_IDENTITY_OK && ferror(input)) {
+        result = CHAT_IDENTITY_ERR_IO;
+    }
+
+    if (result == CHAT_IDENTITY_OK && !server_url_written) {
+        if (had_content && !last_line_had_newline && fputc('\n', output) == EOF) {
+            result = CHAT_IDENTITY_ERR_IO;
+        } else if (fprintf(output, "server_url = \"%s\"\n", server_url) < 0) {
+            result = CHAT_IDENTITY_ERR_IO;
+        }
+    }
+
+    free(line);
+    if (fclose(input) != 0 && result == CHAT_IDENTITY_OK) {
+        result = CHAT_IDENTITY_ERR_IO;
+    }
+    if (fflush(output) != 0 && result == CHAT_IDENTITY_OK) {
+        result = CHAT_IDENTITY_ERR_IO;
+    }
+    if (fsync(fileno(output)) != 0 && result == CHAT_IDENTITY_OK) {
+        result = CHAT_IDENTITY_ERR_IO;
+    }
+    if (fclose(output) != 0 && result == CHAT_IDENTITY_OK) {
+        result = CHAT_IDENTITY_ERR_IO;
+    }
+
+    if (result == CHAT_IDENTITY_OK && rename(temp_path, config_path) != 0) {
+        result = CHAT_IDENTITY_ERR_IO;
+    }
+    if (result != CHAT_IDENTITY_OK) {
+        (void)unlink(temp_path);
+    }
+
+    return result;
 }
 
 chat_identity_result_t chat_identity_load_config_value(const char *key,

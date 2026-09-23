@@ -33,6 +33,33 @@ static void test_identity_create_load_and_permissions(void)
 
     char server_url[CHAT_IDENTITY_SERVER_URL_MAX];
     assert(chat_identity_load_server_url(server_url, sizeof(server_url)) == CHAT_IDENTITY_OK);
+    assert(strcmp(server_url, CHAT_DEFAULT_SERVER_URL) == 0);
+
+    char config_path[256];
+    int config_written = snprintf(config_path, sizeof(config_path), "%s/config.toml", config_dir);
+    assert(config_written > 0);
+    assert((size_t)config_written < sizeof(config_path));
+    FILE *config = fopen(config_path, "a");
+    assert(config != NULL);
+    assert(fputs("ice_force_relay = \"true\"\n", config) >= 0);
+    assert(fclose(config) == 0);
+
+    assert(chat_identity_set_server_url("ws://127.0.0.1:8787") == CHAT_IDENTITY_OK);
+    assert(chat_identity_load_server_url(server_url, sizeof(server_url)) == CHAT_IDENTITY_OK);
+    assert(strcmp(server_url, "ws://127.0.0.1:8787") == 0);
+
+    char preserved_value[16];
+    assert(chat_identity_load_config_value("ice_force_relay",
+                                           preserved_value,
+                                           sizeof(preserved_value)) == CHAT_IDENTITY_OK);
+    assert(strcmp(preserved_value, "true") == 0);
+
+    assert(chat_identity_set_server_url("https://example.org")
+        == CHAT_IDENTITY_ERR_INVALID_SERVER_URL);
+    assert(chat_identity_set_server_url("wss://") == CHAT_IDENTITY_ERR_INVALID_SERVER_URL);
+    assert(chat_identity_set_server_url("wss://example.org\"\nusername = \"attacker")
+        == CHAT_IDENTITY_ERR_INVALID_SERVER_URL);
+    assert(chat_identity_load_server_url(server_url, sizeof(server_url)) == CHAT_IDENTITY_OK);
     assert(strcmp(server_url, "ws://127.0.0.1:8787") == 0);
 
     char key_path[256];

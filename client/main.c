@@ -30,6 +30,7 @@ static void print_usage(FILE *stream)
 {
     fprintf(stream, "Usage:\n");
     fprintf(stream, "  chat init <username>\n");
+    fprintf(stream, "  chat config server <ws:// or wss:// URL>\n");
     fprintf(stream, "  chat status\n");
     fprintf(stream, "  chat fingerprint <username>\n");
     fprintf(stream, "  chat <username>\n");
@@ -60,6 +61,27 @@ static int command_init(const char *username)
 
     printf("Created identity: %s\n", username);
     printf("Fingerprint: %s\n", fingerprint);
+    return CHAT_EXIT_SUCCESS;
+}
+
+static int command_config_server(const char *server_url)
+{
+    chat_identity_result_t result = chat_identity_set_server_url(server_url);
+    if (result == CHAT_IDENTITY_ERR_NOT_FOUND) {
+        fprintf(stderr, "Identity not initialized. Run chat init <username> first.\n");
+        return CHAT_EXIT_GENERIC_ERROR;
+    }
+    if (result == CHAT_IDENTITY_ERR_INVALID_SERVER_URL) {
+        fprintf(stderr, "Invalid server URL. Use ws:// or wss:// followed by a host.\n");
+        return CHAT_EXIT_GENERIC_ERROR;
+    }
+    if (result != CHAT_IDENTITY_OK) {
+        fprintf(stderr, "Could not update server URL: %s.\n", chat_identity_result_name(result));
+        return CHAT_EXIT_GENERIC_ERROR;
+    }
+
+    printf("Server URL updated: %s\n", server_url);
+    printf("Restart chatd to apply the change.\n");
     return CHAT_EXIT_SUCCESS;
 }
 
@@ -439,6 +461,14 @@ int main(int argc, char **argv)
             return CHAT_EXIT_GENERIC_ERROR;
         }
         return command_status();
+    }
+
+    if (strcmp(argv[1], "config") == 0) {
+        if (argc != 4 || strcmp(argv[2], "server") != 0) {
+            print_usage(stderr);
+            return CHAT_EXIT_GENERIC_ERROR;
+        }
+        return command_config_server(argv[3]);
     }
 
     if (strcmp(argv[1], "fingerprint") == 0) {
